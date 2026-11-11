@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Sign Forge</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0; padding: 12px; min-height: 100vh; display: flex; flex-direction: column; gap: 12px;
+    font: 16px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--tg-theme-bg-color, #fff); color: var(--tg-theme-text-color, #111);
+  }
+  h1 { font-size: 17px; margin: 0; font-weight: 600; }
+  p { margin: 0; font-size: 14px; color: var(--tg-theme-hint-color, #777); }
+  #pad { position: relative; width: 100%; aspect-ratio: 5 / 2; background: #fff; border-radius: 12px;
+         border: 1px solid var(--tg-theme-hint-color, #bbb); overflow: hidden; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
+  #line { position: absolute; left: 6%; right: 6%; bottom: 24%; border-top: 1px dashed #bbb; pointer-events: none; }
+  #cross { position: absolute; left: 6%; bottom: calc(24% + 4px); color: #aaa; font-size: 20px; pointer-events: none; }
+  .row { display: flex; gap: 8px; }
+  button { flex: 1; padding: 12px; font: inherit; font-weight: 600; border-radius: 10px; border: 0; cursor: pointer;
+           background: var(--tg-theme-secondary-bg-color, #eee); color: var(--tg-theme-text-color, #111); }
+  button.primary { background: var(--tg-theme-button-color, #2481cc); color: var(--tg-theme-button-text-color, #fff); }
+  button:disabled { opacity: .4; cursor: default; }
+  #msg { min-height: 1.4em; color: #c33; font-size: 14px; }
+</style>
+</head>
+<body>
+  <h1 id="title">Draw your signature</h1>
+  <p id="hint">Sign with your finger on the white pad.</p>
+  <div id="pad"><canvas id="canvas"></canvas><div id="line"></div><div id="cross">×</div></div>
+  <div id="msg"></div>
+  <div class="row">
+    <button id="undo" disabled>Undo</button>
+    <button id="clear" disabled>Clear</button>
+    <button id="done" class="primary" disabled>Done</button>
+  </div>
+<script>
+(function () {
+  "use strict";
+  var W = 600, H = 240, MAX_BYTES = 3900, MAX_STROKES = 24, MAX_POINTS = 1400;
+  var tg = window.Telegram && window.Telegram.WebApp;
+  var TEXT = {
+    en: ["Draw your signature", "Sign with your finger on the white pad.", "Undo", "Clear", "Done", "Too many strokes. Press Clear and try again."],
+    uk: ["Намалюйте підпис", "Розпишіться пальцем на білому полі.", "Назад", "Очистити", "Готово", "Забагато штрихів. Натисніть «Очистити» і спробуйте ще раз."],
+    es: ["Dibuja tu firma", "Firma con el dedo en el panel blanco.", "Deshacer", "Borrar", "Listo", "Demasiados trazos. Pulsa Borrar e inténtalo de nuevo."],
+    pt: ["Desenhe sua assinatura", "Assine com o dedo no quadro branco.", "Desfazer", "Limpar", "Concluir", "Muitos traços. Toque em Limpar e tente novamente."]
+  };
+  var lang = ((tg && tg.initDataUnsafe && tg.initDataUnsafe.user && tg.initDataUnsafe.user.language_code) ||
+              navigator.language || "en").slice(0, 2);
+  var T = TEXT[lang] || TEXT.en;
+  document.documentElement.lang = TEXT[lang] ? lang : "en";
+  document.getElementById("title").textContent = T[0];
+  document.getElementById("hint").textContent = T[1];
+  document.getElementById("undo").textContent = T[2];
+  document.getElementById("clear").textContent = T[3];
+  document.getElementById("done").textContent = T[4];
+  if (tg) { tg.ready(); tg.expand(); }
+
+  var canvas = document.getElementById("canvas"), ctx = canvas.getContext("2d");
+  var undoBtn = document.getElementById("undo"), clearBtn = document.getElementById("clear"),
+      doneBtn = document.getElementById("done"), msg = document.getElementById("msg");
+  var strokes = [], current = null, dpr = Math.max(1, window.devicePixelRatio || 1);
+
+  function resize() {
+    var r = canvas.getBoundingClientRect();
+    canvas.width = Math.round(r.width * dpr); canvas.height = Math.round(r.height * dpr);
+    redraw();
+  }
+  function toCanvas(e) {
+    var r = canvas.getBoundingClientRect();
+    return [Math.min(W, Math.max(0, Math.round((e.clientX - r.left) / r.width * W))),
+            Math.min(H, Math.max(0, Math.round((e.clientY - r.top) / r.height * H)))];
+  }
+  function redraw() {
+    ctx.setTransform(canvas.width / W, 0, 0, canvas.height / H, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    ctx.lineCap = "round"; ctx.lineJoin = "round"; ctx.lineWidth = 3.4; ctx.strokeStyle = "#101860"; ctx.fillStyle = "#101860";
+    strokes.concat(current ? [current] : []).forEach(function (s) {
+      if (s.length === 1) { ctx.beginPath(); ctx.arc(s[0][0], s[0][1], 1.7, 0, 2 * Math.PI); ctx.fill(); return; }
+      ctx.beginPath(); ctx.moveTo(s[0][0], s[0][1]);
+      for (var i = 1; i < s.length; i++) ctx.lineTo(s[i][0], s[i][1]);
+      ctx.stroke();
+    });
+    var has = strokes.length > 0;
+    undoBtn.disabled = clearBtn.disabled = doneBtn.disabled = !has;
+  }
+  canvas.addEventListener("pointerdown", function (e) {
+    if (strokes.length >= MAX_STROKES) { msg.textContent = T[5]; return; }
+    msg.textContent = "";
+    canvas.setPointerCapture(e.pointerId);
+    current = [toCanvas(e)]; redraw();
+  });
+  canvas.addEventListener("pointermove", function (e) {
+    if (!current) return;
+    var evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+    (evs.length ? evs : [e]).forEach(function (ev) { current.push(toCanvas(ev)); });
+    redraw();
+  });
+  function end() { if (current) { strokes.push(current); current = null; redraw(); } }
+  canvas.addEventListener("pointerup", end);
+  canvas.addEventListener("pointercancel", end);
+  undoBtn.onclick = function () { strokes.pop(); msg.textContent = ""; redraw(); };
+  clearBtn.onclick = function () { strokes = []; msg.textContent = ""; redraw(); };
+
+  // Ramer-Douglas-Peucker: fewer points, same shape.
+  function rdp(pts, eps) {
+    if (pts.length < 3) return pts;
+    var a = pts[0], b = pts[pts.length - 1], dmax = 0, idx = 0;
+    var dx = b[0] - a[0], dy = b[1] - a[1], len = Math.hypot(dx, dy);
+    for (var i = 1; i < pts.length - 1; i++) {
+      var d = len === 0 ? Math.hypot(pts[i][0] - a[0], pts[i][1] - a[1])
+                        : Math.abs(dy * pts[i][0] - dx * pts[i][1] + b[0] * a[1] - b[1] * a[0]) / len;
+      if (d > dmax) { dmax = d; idx = i; }
+    }
+    if (dmax <= eps) return [a, b];
+    return rdp(pts.slice(0, idx + 1), eps).slice(0, -1).concat(rdp(pts.slice(idx), eps));
+  }
+  function encode() {
+    for (var eps = 0.8; eps < 40; eps *= 1.35) {
+      var flat = strokes.map(function (s) {
+        var out = [], last = null;
+        rdp(s, eps).forEach(function (p) {
+          if (!last || last[0] !== p[0] || last[1] !== p[1]) { out.push(p[0], p[1]); last = p; }
+        });
+        return out;
+      });
+      var points = flat.reduce(function (n, s) { return n + s.length / 2; }, 0);
+      var json = JSON.stringify({ v: 1, w: W, h: H, s: flat });
+      if (points <= MAX_POINTS && json.length <= MAX_BYTES) return json;
+    }
+    return null;
+  }
+  doneBtn.onclick = function () {
+    var json = encode();
+    if (!json) { msg.textContent = T[5]; return; }
+    if (tg) tg.sendData(json); else console.log(json);
+  };
+  window.addEventListener("resize", resize);
+  resize();
+})();
+</script>
+</body>
+</html>
